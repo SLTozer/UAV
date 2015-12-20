@@ -1,29 +1,49 @@
 classdef UavBrain < handle
     
-    properties
+    % UAV control properties
+    properties (SetAccess = public, GetAccess = public)
         currentState;
+        nextTurnRate;
+        nextVelocity;
+        targetPos;
+        mapRect;
+    end
+    % UAV data
+    properties (SetAccess = public, GetAccess = public)
         uavBody;
         posEstimate;
         bearingEstimate;
-        
-        nextTurnRate;
-        nextVelocity;
-        
-        targetPos;
         conc;
+        lastPosEstimate;
+        lastConc;
     end
     
     methods
-        function uavBrain = UavBrain(uavBody)
+        function uavBrain = UavBrain(uavBody, mapRect)
             uavBrain.uavBody = uavBody;
             uavBrain.currentState = UavState.CalibrationState;
             uavBrain.posEstimate = uavBody.getGpsPos();
             uavBrain.bearingEstimate = 0;
             uavBrain.targetPos = [0,0];
             uavBrain.conc = 0;
+            uavBrain.mapRect = mapRect;
+        end
+        
+        function message = getMessage(uavBrain)
+            message = zeros(1,4);
+            message(1) = uavBrain.posEstimate(1);
+            message(2) = uavBrain.posEstimate(2);
+            message(3) = uavBrain.bearingEstimate;
+            message(4) = uavBrain.conc;
         end
         
         function decisionStep(uavBrain, cloud, t, dt, messages)
+            % Update UAV data
+            uavBrain.lastPosEstimate = uavBrain.posEstimate;
+            uavBrain.lastConc = uavBrain.conc;
+            uavBrain.posEstimate = uavBrain.uavBody.getGpsPos();
+            uavBrain.conc = uavBrain.uavBody.sensorReading(cloud, t);
+            % Perform state actions
             switch uavBrain.currentState
                 case UavState.CalibrationState
                     nextState = calibration(uavBrain, cloud, t, dt);
@@ -36,6 +56,7 @@ classdef UavBrain < handle
                 otherwise
                     error('UAV brain has invalid state.');
             end
+            % Update AI state and send commands
             uavBrain.currentState = nextState;
             uavBrain.uavBody.setVelocity(uavBrain.nextVelocity);
             uavBrain.uavBody.setTurnRate(uavBrain.nextTurnRate);
@@ -43,25 +64,14 @@ classdef UavBrain < handle
                                        (uavBrain.nextTurnRate * uavBrain.nextVelocity * dt));
         end
         
-        function message = getMessage(uavBrain)
-            message = zeros(1,4);
-            message(1) = uavBrain.posEstimate(1);
-            message(2) = uavBrain.posEstimate(2);
-            message(3) = uavBrain.bearingEstimate;
-            message(4) = uavBrain.conc;
-        end
-        
         function nextState = calibration(uavBrain, cloud, t, dt)
             % Update bearing estimate
-            newPosEstimate = uavBrain.uavBody.getGpsPos();
-            estimatedMove = newPosEstimate - uavBrain.posEstimate;
+            estimatedMove = uavBrain.posEstimate - uavBrain.lastPosEstimate;
             
             calculatedMove = [sin(uavBrain.bearingEstimate), ...
                               cos(uavBrain.bearingEstimate)];
                           
             combinedMove = estimatedMove + calculatedMove;
-            % Update internal information
-            uavBrain.posEstimate = newPosEstimate;
             uavBrain.bearingEstimate = atan2(combinedMove(1), combinedMove(2));
             % Set movement values
             uavBrain.nextVelocity = 10;
@@ -74,13 +84,13 @@ classdef UavBrain < handle
             end
         end
         function nextState = search(uavBrain, cloud, t, dt)
-            uavBrain.posEstimate = uavBrain.uavBody.getGpsPos();
             targetDiff = uavBrain.targetPos - uavBrain.posEstimate;
             % If the target location has been reached, find a new target
             % location
             while norm(targetDiff) <= UavBody.MaxVelocity * dt
-                uavBrain.targetPos = [(rand * (max(cloud.x)-min(cloud.x))) + min(cloud.x), ...
-                                      (rand * (max(cloud.y)-min(cloud.y))) + min(cloud.x)];
+                uavBrain.targetPos = ...
+                    [(rand * (uavBrain.mapRect(2,1)-uavBrain.mapRect(1,1))) + uavBrain.mapRect(1,1), ...
+                    (rand * (uavBrain.mapRect(2,2)-uavBrain.mapRect(1,2))) + uavBrain.mapRect(1,2)];
             targetDiff = uavBrain.targetPos - uavBrain.posEstimate;
             end
             targetAng = atan2(targetDiff(1), targetDiff(2));
@@ -98,7 +108,6 @@ classdef UavBrain < handle
                 uavBrain.nextVelocity = UavBody.MaxVelocity;
             end
             
-            uavBrain.conc = uavBrain.uavBody.sensorReading(cloud, t);
             % Transition state if the cloud is detected
             if uavBrain.conc > 0.05
                 nextState = UavState.ApproachState;
@@ -107,8 +116,7 @@ classdef UavBrain < handle
             end
         end
         function nextState = approach(uavBrain, cloud, t, dt)
-            newConc = uavBrain.uavBody.sensorReading(cloud, t);
-            concDiff = newConc - uavBrain.conc;
+            concDiff = uavBrain.conc - uavBrain.lastConc;
             % If we are flying into the cloud, turn a gentle right
             if concDiff > 0
                 uavBrain.nextVelocity = UavBody.MaxVelocity;
@@ -118,8 +126,6 @@ classdef UavBrain < handle
                 uavBrain.nextVelocity = UavBody.MinVelocity;
                 uavBrain.nextTurnRate = UavBody.MaxTurnRate;
             end
-            % Assign internal state
-            uavBrain.conc = newConc;
             % Transition state back to searching if concentration gets too
             % low, or on to tracking if it crosses the threshold
             if uavBrain.conc < 0.025;

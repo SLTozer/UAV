@@ -10,6 +10,8 @@ function sim_start
 % load 'cloud1.mat'
 load 'cloud2.mat'
 
+mapRect = [min(cloud.x),min(cloud.y);max(cloud.x),max(cloud.y)];
+
 % time and time step
 t = 0;
 dt = 1.0;
@@ -20,7 +22,7 @@ num = 1;
 uavBodies(num,1) = UavBody();
 uavBrains = UavBrain.empty(num,0);
 for i = 1:num
-    uavBrains(i) = UavBrain(uavBodies(i));
+    uavBrains(i) = UavBrain(uavBodies(i), mapRect);
 end
 
 % i-th message is sent from the i-th uav, and is formatted as:
@@ -47,8 +49,8 @@ for kk=1:1000,
     % Timestep [t -> t + dt]
     t = t + dt;
     for i = 1:num
-        uavBodies(i).move(dt);
         uavMessages(i,:) = uavBrains(i).getMessage();
+        uavBodies(i).move(dt);
     end
     
     %% Display
