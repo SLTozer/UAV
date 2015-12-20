@@ -23,7 +23,7 @@ classdef UavBrain < handle
             uavBrain.conc = 0;
         end
         
-        function decisionStep(uavBrain, cloud, t, dt)
+        function decisionStep(uavBrain, cloud, t, dt, messages)
             switch uavBrain.currentState
                 case UavState.CalibrationState
                     nextState = calibration(uavBrain, cloud, t, dt);
@@ -41,6 +41,14 @@ classdef UavBrain < handle
             uavBrain.uavBody.setTurnRate(uavBrain.nextTurnRate);
             uavBrain.bearingEstimate = wrapToPi(uavBrain.bearingEstimate + ...
                                        (uavBrain.nextTurnRate * uavBrain.nextVelocity * dt));
+        end
+        
+        function message = getMessage(uavBrain)
+            message = zeros(1,4);
+            message(1) = uavBrain.posEstimate(1);
+            message(2) = uavBrain.posEstimate(2);
+            message(3) = uavBrain.bearingEstimate;
+            message(4) = uavBrain.conc;
         end
         
         function nextState = calibration(uavBrain, cloud, t, dt)

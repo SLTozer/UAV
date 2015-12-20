@@ -53,6 +53,10 @@ classdef UavBody < handle
         function conc = sensorReading(uavBody, cloud, t)
             conc = cloudsamp(cloud, uavBody.pos(1), uavBody.pos(2), t);
         end
+        
+        function plot(uavBody)
+            plot(uavBody.pos(1),uavBody.pos(2),'o');
+        end
     end
     
 end

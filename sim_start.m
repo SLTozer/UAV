@@ -14,8 +14,22 @@ load 'cloud2.mat'
 t = 0;
 dt = 1.0;
 
-uavBody = UavBody;
-uavBrain = UavBrain(uavBody);
+% number of UAVs
+num = 1;
+
+uavBodies(num,1) = UavBody();
+uavBrains = UavBrain.empty(num,0);
+for i = 1:num
+    uavBrains(i) = UavBrain(uavBodies(i));
+end
+
+% i-th message is sent from the i-th uav, and is formatted as:
+% [x y bearing concentration]
+if dt ~= 1.0
+    error(['Message logic has not been set to deal with timesteps '...
+           'other than 1.0']);
+end
+uavMessages = zeros(num,4);
 
 % open new figure window
 figure
@@ -23,31 +37,30 @@ hold on % so each plot doesn't wipte the predecessor
 
 % main simulation loop
 for kk=1:1000,
-    
+    %% Decision step
     % Make decisions from time [t -> t + dt]
-    uavBrain.decisionStep(cloud, t, dt);
+    for i = 1:num
+        uavBrains(i).decisionStep(cloud, t, dt, uavMessages);
+    end
     
+    %% Physical timestep
     % Timestep [t -> t + dt]
     t = t + dt;
-    uavBody.move(dt);
+    for i = 1:num
+        uavBodies(i).move(dt);
+        uavMessages(i,:) = uavBrains(i).getMessage();
+    end
     
-    
-    % Get measurements for display
-    p = uavBody.sensorReading(cloud, t);
-    x = uavBody.pos;
-    y = uavBrain.targetPos;
-    b = uavBrain.bearingEstimate;
+    %% Display
     
     % clear the axes for fresh plotting
     cla
-    
     % put information in the title
-    title(sprintf('t=%.1f secs pos=(%.1f, %.1f)  Concentration=%.2f  estHead=%.2f',t, x(1),x(2),p,b))
-        
+    title(sprintf('t=%.1f secs',t))
     % plot robot location
-    plot(x(1),x(2),'o')
-    plot(y(1),y(2),'x')
-    
+    for i = 1:num
+        uavBodies(i).plot();
+    end
     % plot the cloud contours
     cloudplot(cloud,t)
     
