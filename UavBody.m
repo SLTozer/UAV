@@ -4,11 +4,13 @@ classdef UavBody < handle
         MaxTurnRate = pi/30;
         MinVelocity = 10;
         MaxVelocity = 20;
+        CrashRadius = 10;
     end
     
     properties (SetAccess = private, GetAccess = public)
         pos
         bearing
+        operational
     end
     properties (SetAccess = private, GetAccess = public)
         vel
@@ -21,13 +23,16 @@ classdef UavBody < handle
             uavBody.bearing = 0;
             uavBody.vel = 15;
             uavBody.turnRate = 0;
+            uavBody.operational = true;
         end
         
         function move(uavBody, dt)
-            distance = uavBody.vel * dt;
-            moveVec = [sin(uavBody.bearing),cos(uavBody.bearing)] * distance;
-            uavBody.pos = uavBody.pos + moveVec;
-            uavBody.bearing = wrapToPi(uavBody.bearing + (uavBody.turnRate * distance));
+            if uavBody.operational
+                distance = uavBody.vel * dt;
+                moveVec = [sin(uavBody.bearing),cos(uavBody.bearing)] * distance;
+                uavBody.pos = uavBody.pos + moveVec;
+                uavBody.bearing = wrapToPi(uavBody.bearing + (uavBody.turnRate * distance));
+            end
         end
         
         function setVelocity(uavBody, newVel)

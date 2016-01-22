@@ -15,9 +15,11 @@ mapRect = [min(cloud.x),min(cloud.y);max(cloud.x),max(cloud.y)];
 % time and time step
 t = 0;
 dt = 1.0;
+% UAVs have flight time of 30 mins only
+maxTime = 1800.0;
 
 % number of UAVs
-num = 1;
+num = 20;
 
 uavBodies(num,1) = UavBody();
 uavBrains = UavBrain.empty(num,0);
@@ -26,23 +28,29 @@ for i = 1:num
 end
 
 % i-th message is sent from the i-th uav, and is formatted as:
-% [x y bearing concentration]
+% [x y bearing concentration sent], where:
+%   x & y are the perceived [x,y] coordinates of the UAV
+%   bearing is the perceived bearing of the UAV
+%   concentration is the measured cloud concentration of the UAV
+%   sent indicates if the UAV sent a message - this is not an actual part
+%       of the  message sent by the UAV, but an indicator variable (used
+%       for efficiency)
+uavMessages(num,1) = Message();
 if dt ~= 1.0
     error(['Message logic has not been set to deal with timesteps '...
            'other than 1.0']);
 end
-uavMessages = zeros(num,4);
 
 % open new figure window
 figure
-hold on % so each plot doesn't wipte the predecessor
+hold on % so each plot doesn't wipe the predecessor
 
 % main simulation loop
-for kk=1:1000,
+while t < maxTime,
     %% Decision step
-    % Make decisions from time [t -> t + dt]
+    % Make decisions at time t
     for i = 1:num
-        uavBrains(i).decisionStep(cloud, t, dt, uavMessages);
+        uavBrains(i).decisionStep(cloud, t, dt, uavMessages, i);
     end
     
     %% Physical timestep
