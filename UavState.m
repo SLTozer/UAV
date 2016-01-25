@@ -1,4 +1,4 @@
-classdef UavState < uint32
+classdef UavState < uint8
     enumeration
         Inactive    (0)
         Start       (1)

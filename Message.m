@@ -1,16 +1,25 @@
 classdef Message
     % Message sent by a UAV; no larger than 32 bytes
     properties
+        % 16 bytes
         pos;
-        conc;
+        % 8 bytes
+        bearing;
+        % 1 byte
         state;
+        % 1 byte
+        pheremoneType;
+        % 1 byte
+        id;
     end    
     
     methods
         function message = Message()
             message.pos = [0,0];
+            message.id = -1;
+            message.bearing = 0;
             message.state = UavState.Inactive;
-            message.conc = 0;
+            message.pheremoneType = PheremoneType.None;
         end
     end
 end
