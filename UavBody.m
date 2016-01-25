@@ -10,17 +10,17 @@ classdef UavBody < handle
     properties (SetAccess = private, GetAccess = public)
         pos
         bearing
-        operational
     end
     properties (SetAccess = private, GetAccess = public)
         vel
         turnRate
+        operational
     end
     
     methods
-        function uavBody = UavBody()
-            uavBody.pos = [0,0];
-            uavBody.bearing = 0;
+        function uavBody = UavBody(pos, bearing)
+            uavBody.pos = pos;
+            uavBody.bearing = bearing;
             uavBody.vel = 15;
             uavBody.turnRate = 0;
             uavBody.operational = true;
@@ -28,10 +28,12 @@ classdef UavBody < handle
         
         function move(uavBody, dt)
             if uavBody.operational
-                distance = uavBody.vel * dt;
-                moveVec = [sin(uavBody.bearing),cos(uavBody.bearing)] * distance;
-                uavBody.pos = uavBody.pos + moveVec;
-                uavBody.bearing = wrapToPi(uavBody.bearing + (uavBody.turnRate * distance));
+%                 distance = uavBody.vel * dt;
+%                 moveVec = [sin(uavBody.bearing),cos(uavBody.bearing)] * distance;
+%                 uavBody.pos = uavBody.pos + moveVec;
+%                 uavBody.bearing = wrapToPi(uavBody.bearing + (uavBody.turnRate * distance));
+                [uavBody.pos, uavBody.bearing] = ...
+                    moveRungeKutta( uavBody.pos, uavBody.bearing, uavBody.vel, uavBody.turnRate, dt );
             end
         end
         
