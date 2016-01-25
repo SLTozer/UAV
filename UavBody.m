@@ -15,25 +15,36 @@ classdef UavBody < handle
         vel
         turnRate
         operational
+        batteryLife
     end
     
     methods
-        function uavBody = UavBody(pos, bearing)
+        function uavBody = UavBody(pos, bearing, batteryLife)
             uavBody.pos = pos;
+            uavBody.batteryLife = batteryLife;
             uavBody.bearing = bearing;
             uavBody.vel = 15;
             uavBody.turnRate = 0;
             uavBody.operational = true;
         end
         
+        function out = outsideMap(uavBody, mapRect)
+            out = ...
+                uavBody.pos(1) < mapRect(1,1) || ... 
+                uavBody.pos(1) > mapRect(2,1) || ...
+                uavBody.pos(2) < mapRect(1,2) || ...
+                uavBody.pos(2) > mapRect(2,2);
+        end
+        
+        function disable(uavBody)
+            uavBody.operational = false;
+        end
+        
         function move(uavBody, dt)
             if uavBody.operational
-%                 distance = uavBody.vel * dt;
-%                 moveVec = [sin(uavBody.bearing),cos(uavBody.bearing)] * distance;
-%                 uavBody.pos = uavBody.pos + moveVec;
-%                 uavBody.bearing = wrapToPi(uavBody.bearing + (uavBody.turnRate * distance));
                 [uavBody.pos, uavBody.bearing] = ...
                     moveRungeKutta( uavBody.pos, uavBody.bearing, uavBody.vel, uavBody.turnRate, dt );
+                uavBody.batteryLife = uavBody.batteryLife - dt;
             end
         end
         
@@ -62,7 +73,18 @@ classdef UavBody < handle
         end
         
         function plot(uavBody)
-            plot(uavBody.pos(1),uavBody.pos(2),'o');
+            if uavBody.operational
+                plot(uavBody.pos(1),uavBody.pos(2),'o');
+            else
+                plot(uavBody.pos(1),uavBody.pos(2),'ok');
+            end
+        end
+        
+    end
+    
+    methods(Static)
+        function colliding = collision(uavA, uavB, dist)
+            colliding = (sqrLen(uavA.pos - uavB.pos) <= dist^2);
         end
     end
     

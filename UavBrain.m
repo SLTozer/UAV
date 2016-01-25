@@ -3,11 +3,14 @@ classdef UavBrain < handle
     % UAV behavioural constants
     properties (Constant)
         AvoidanceRadius = 135;
+        DangerRadius = 65;
         RandomWalkMaxDistance = 600.0;
         FirstTarget = [0 100];
         PheremoneDetectionRange = 800.0;
         PheremoneAvoidanceRange = 300.0;
-        ApproachTimeoutTime = 100;
+        MaxPheremoneCount = 100;
+        ApproachTimeoutTime = 100.0;
+        CalibrationTime = 30.0;
     end
     
     % UAV physical state
@@ -29,8 +32,9 @@ classdef UavBrain < handle
         conc;
         lastConc;
         % Avoidance data
-        closeUavs;
-        closeSqrDists;
+        closestUav;
+        closestSqrDist;
+        closeUavCount;
     end
     % UAV AI state
     % Used to control the actions taken by the UAVs AI
@@ -42,11 +46,14 @@ classdef UavBrain < handle
         calibrated;
         % Tracking data
         localPheremones;
+        localPheremoneCount;
         nextPheremone;
         % State data
+        calibrationTimer;
         approachTimeout;
         searchTimeout;
         retreating;
+        home;
     end
     
     methods
@@ -60,24 +67,65 @@ classdef UavBrain < handle
             uavBrain.conc = 0;
             uavBrain.mapRect = mapRect;
             uavBrain.calibrated = false;
-            uavBrain.localPheremones = [];
+            %uavBrain.localPheremones(1,UavBrain.MaxPheremoneCount) = Pheremone([0 0], PheremoneType.None);
+            uavBrain.localPheremones = Pheremone([0 0], PheremoneType.None);
+            for i = 1:UavBrain.MaxPheremoneCount
+                uavBrain.localPheremones(i) = Pheremone([0 0], PheremoneType.None);
+            end
             uavBrain.nextPheremone = PheremoneType.None;
             uavBrain.approachTimeout = 0;
             uavBrain.retreating = false;
+            uavBrain.home = [0 0];
+            uavBrain.localPheremoneCount = 0;
+            uavBrain.closeUavCount = 0;
         end
         
-        function [closestUav, closestSqrDist] = findClosestUav(uavBrain, messages)
+        function leaving = leavingMap(uavBrain)
+            moved = uavBrain.posEstimate - uavBrain.lastPosEstimate;
+            if uavBrain.posEstimate(1) < uavBrain.mapRect(1,1) && moved(1) < 0
+                leaving = true;
+            elseif uavBrain.posEstimate(1) > uavBrain.mapRect(2,1) && moved(1) > 0
+                leaving = true;
+            elseif uavBrain.posEstimate(2) < uavBrain.mapRect(1,2) && moved(2) < 0
+                leaving = true;
+            elseif uavBrain.posEstimate(2) > uavBrain.mapRect(2,2) && moved(2) > 0
+                leaving = true;
+            else
+                leaving = false;
+            end
+        end
+        
+        % Returns true if this UAV has priority over another UAV with the
+        % given state and ID
+        function hasPriority = uavPriority(uavBrain, otherID, otherState)
+            statePriority = UavState.priority(uavBrain.currentState, otherState);
+            if statePriority > 0
+                hasPriority = true;
+            elseif statePriority < 0
+                hasPriority = false;
+            else
+                if uavBrain.id > otherID
+                    hasPriority = true;
+                else
+                    hasPriority = false;
+                end
+            end
+        end
+        
+        function [closestUav, closestSqrDist, closeUavCount] = findClosestUav(uavBrain, messages)
             closestSqrDist = inf;
             closestUav = 0;
+            closeUavCount = 0;
             messageCount = size(messages(:,1));
             for i = 1:messageCount
-                if messages(i).id == uavBrain.id || messages(i).state ~= UavState.Inactive
+                if messages(i).id == uavBrain.id || messages(i).state == UavState.Inactive
                     continue
                 end
                 differenceVector = uavBrain.posEstimate - messages(i).pos;
-                squaredDistance = ...
-                    (differenceVector(1)*differenceVector(1)) ...
-                    * (differenceVector(2)*differenceVector(2));
+                squaredDistance = sqrLen(differenceVector);
+                if squaredDistance <= UavBrain.AvoidanceRadius^2
+                    closeUavCount = closeUavCount + 1;
+                end
                 if squaredDistance < closestSqrDist
                     closestSqrDist = squaredDistance;
                     closestUav = i;
@@ -115,7 +163,7 @@ classdef UavBrain < handle
                 message.state = uavBrain.currentState;
                 message.bearing = uavBrain.bearingEstimate;
                 message.pheremoneType = uavBrain.nextPheremone;
-                message.id = uavBrain.id;
+                message.id = uint8(uavBrain.id);
             end
         end
         
@@ -163,12 +211,14 @@ classdef UavBrain < handle
         % database
         function getPheremoneData(uavBrain, messages)
             for i = 1:length(messages)
-                if messages(i).pheremoneType ~= PheremoneType.None
+                if messages(i).pheremoneType ~= PheremoneType.None ...
+                        && uavBrain.localPheremoneCount < UavBrain.MaxPheremoneCount
+                    uavBrain.localPheremoneCount = uavBrain.localPheremoneCount + 1;
                     pheremoneVec = messages(i).pos - uavBrain.posEstimate;
                     sqrPheremoneDist = pheremoneVec(1)^2 + pheremoneVec(2)^2;
                     if sqrPheremoneDist <= UavBrain.PheremoneDetectionRange^2
                         pheremone = Pheremone(messages(i).pos, messages(i).pheremoneType);
-                        uavBrain.localPheremones = [uavBrain.localPheremones pheremone];
+                        uavBrain.localPheremones(uavBrain.localPheremoneCount) = pheremone;
                     end
                 end
             end
@@ -180,14 +230,18 @@ classdef UavBrain < handle
         % being deleted will typically be at the start of the array -
         % consider using some kind of sorting and/or preallocation.
         function updatePheremoneData(uavBrain, dt)
-            for i = 1:length(uavBrain.localPheremones)
+            removePheremoneCount = 0;
+            for i = 1:uavBrain.localPheremoneCount
                 uavBrain.localPheremones(i).duration = ...
                     uavBrain.localPheremones(i).duration - dt;
+                if uavBrain.localPheremones(i).duration <= 0
+                    removePheremoneCount = removePheremoneCount + 1;
+                end
             end
-            startLen = length(uavBrain.localPheremones);
-            for i = 0:startLen-1
-                if uavBrain.localPheremones(startLen-i).duration <= 0
-                    uavBrain.localPheremones(startLen-i) = [];
+            if removePheremoneCount > 0
+                uavBrain.localPheremoneCount = uavBrain.localPheremoneCount - removePheremoneCount;
+                for i = 1:uavBrain.localPheremoneCount
+                    uavBrain.localPheremones(i) = uavBrain.localPheremones(i+removePheremoneCount);
                 end
             end
         end
@@ -211,15 +265,18 @@ classdef UavBrain < handle
                     target(2) >= uavBrain.mapRect(1,2) & ...
                     target(2) <= uavBrain.mapRect(2,2));
                 i = 1;
-                while valid == true && i <= length(uavBrain.localPheremones)
-                    if uavBrain.localPheremones(i).type == PheremoneType.Searched
-                        pheremoneVec = uavBrain.localPheremones(i).pos - target;
-                        sqrPheremoneDist = sqrLen(pheremoneVec);
-                        if sqrPheremoneDist <= sqrPheremoneRadius
-                            valid = false;
+                % To prevent near-infinite loops
+                if attemptCount < 20
+                    while valid == true && i <= length(uavBrain.localPheremones)
+                        if uavBrain.localPheremones(i).type == PheremoneType.Searched
+                            pheremoneVec = uavBrain.localPheremones(i).pos - target;
+                            sqrPheremoneDist = sqrLen(pheremoneVec);
+                            if sqrPheremoneDist <= sqrPheremoneRadius
+                                valid = false;
+                            end
                         end
+                        i = i + 1;
                     end
-                    i = i + 1;
                 end
                 if currentRadius < (uavBrain.mapRect(2,1) - uavBrain.mapRect(1,1))/2
                     currentRadius = currentRadius + 100.0;
@@ -230,45 +287,46 @@ classdef UavBrain < handle
         
         % Make decisions at time t
         function decisionStep(uavBrain, cloud, t, dt, messages)
+            % Do nothing if the UAV is no longer active
             if uavBrain.uavBody.operational == false
                 return;
             end
-            % Update UAV data
+            %% Update UAV data
             uavBrain.lastPosEstimate = uavBrain.posEstimate;
             uavBrain.lastConc = uavBrain.conc;
             uavBrain.posEstimate = uavBrain.uavBody.getGpsPos();
             uavBrain.conc = uavBrain.uavBody.sensorReading(cloud, t);
-            [uavBrain.closeUavs, uavBrain.closeSqrDists] = ...
-                uavBrain.findCloseUavs(messages);
-%             if uavBrain.currentState ~= UavState.Avoidance && ~isempty(uavBrain.closeUavs)
-%                 uavBrain.lastState = uavBrain.currentState;
-%                 uavBrain.currentState = UavState.Avoidance;
-%             elseif uavBrain.currentState == UavState.Avoidance && isempty(uavBrain.closeUavs)
-%                 uavBrain.currentState = uavBrain.lastState;
-%                 uavBrain.lastState = UavState.Avoidance;
-%             end
+            %[uavBrain.closeUavs, uavBrain.closeSqrDists] = ...
+            %    uavBrain.findCloseUavs(messages);
+            [uavBrain.closestUav, uavBrain.closestSqrDist, uavBrain.closeUavCount] ...
+                = uavBrain.findClosestUav(messages);
             uavBrain.getPheremoneData(messages);
             uavBrain.nextPheremone = PheremoneType.None;
-            % Perform state actions
+            %% Perform state actions
             switch uavBrain.currentState
                 case UavState.Start
-                    nextState = start(uavBrain, cloud, t, dt, messages);
-                case UavState.Avoidance
-                    nextState = avoidance(uavBrain, cloud, t, dt, messages);
+                    nextState = start(uavBrain, dt, messages);
                 case UavState.Calibration
-                    nextState = calibration(uavBrain, cloud, t, dt, messages);
+                    nextState = calibration(uavBrain, dt, messages);
                 case UavState.Search
-                    nextState = search(uavBrain, cloud, t, dt, messages);
+                    nextState = search(uavBrain, dt, messages);
                 case UavState.Approach
-                    nextState = approach(uavBrain, cloud, t, dt, messages);
+                    nextState = approach(uavBrain, dt, messages);
                 case UavState.Track
-                    nextState = track(uavBrain, cloud, t, dt, messages);
+                    nextState = track(uavBrain, dt, messages);
+                case UavState.Land
+                    nextState = land(uavBrain, dt, messages);
                 otherwise
                     error('UAV brain has invalid state.');
             end
-            % Update AI state and send commands
+            %% Update AI state and send commands
             uavBrain.lastState = uavBrain.currentState;
-            uavBrain.currentState = nextState;
+            % Allow 2 minutes to return to the landing position
+            if uavBrain.uavBody.batteryLife < 120
+                uavBrain.currentState = UavState.Land;
+            else
+                uavBrain.currentState = nextState;
+            end
             uavBrain.uavBody.setVelocity(uavBrain.nextVelocity);
             uavBrain.uavBody.setTurnRate(uavBrain.nextTurnRate);
             uavBrain.bearingEstimate = wrapToPi(uavBrain.bearingEstimate + ...
@@ -276,36 +334,42 @@ classdef UavBrain < handle
             uavBrain.updatePheremoneData(dt);
         end
         
+        function draw(uavBrain, extra)
+            if uavBrain.uavBody.operational
+                if uavBrain.currentState == UavState.Search
+                    plot(uavBrain.targetPos(1),uavBrain.targetPos(2),'x');
+                end
+                if extra
+                    for i = 1:length(uavBrain.localPheremones)
+                        if uavBrain.localPheremones(i).type == PheremoneType.Searched
+                            pos = uavBrain.localPheremones(i).pos;
+                            plot(pos(1),pos(2),'+b'); 
+                        end
+                    end
+                end    
+            end
+        end
+        
         %% State functions
         % Start state
-        function nextState = start(uavBrain, cloud, t, dt, messages)
+        function nextState = start(uavBrain, dt, messages)
             uavBrain.nextVelocity = UavBody.MinVelocity;
             uavBrain.nextTurnRate = 0;
+            uavBrain.home = uavBrain.posEstimate;
             if uavBrain.uavBody.operational
                 nextState = UavState.Calibration;
             else
                 nextState = UavState.Start;
             end
         end
-        
-        % Avoidance state
-        function nextState = avoidance(uavBrain, cloud, t, dt, messages)
-            %% State Actions
-            [~, closestUavInd] = min(uavBrain.closeSqrDists);
-            closestUav = uavBrain.closeUavs(closestUavInd);
-            closestUavPos = messages(closestUav).pos;
-            closestUavBearing = messages(closestUav).bearing;
-            
-            % Find the avoidance trajectory and use
-            [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
-                uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
-            
-            %% State Transition
-        end
-        
+                
         % Calibration state
-        function nextState = calibration(uavBrain, cloud, t, dt, messages)
+        function nextState = calibration(uavBrain, dt, messages)
             %% State Actions
+            if uavBrain.lastState ~= UavState.Calibration
+                uavBrain.calibrationTimer = UavBrain.CalibrationTime;
+            end
+            uavBrain.calibrationTimer = uavBrain.calibrationTimer - dt;
             % Update bearing estimate
             estimatedMove = uavBrain.posEstimate - uavBrain.lastPosEstimate;
             
@@ -322,7 +386,7 @@ classdef UavBrain < handle
             % Transition state if enough total time has elapsed
             %if uavBrain.closestSqrDistance < UavBrain.AvoidanceRadius^2
             %    nextState = UavState.Avoidance;
-            if (t > 30)
+            if (uavBrain.calibrationTimer <= 0)
                 uavBrain.calibrated = true;
                 nextState = UavState.Search;
             else
@@ -339,10 +403,9 @@ classdef UavBrain < handle
         % Avoidance behaviour is integrated into the search state by
         % finding a new random walk whenever the current path would lead to
         % a collision.
-        function nextState = search(uavBrain, cloud, t, dt, messages)
+        function nextState = search(uavBrain, dt, messages)
             %% State Actions
-            if uavBrain.lastState ~= UavState.Search && ...
-                    uavBrain.lastState ~= UavState.Avoidance
+            if uavBrain.lastState ~= UavState.Search
                 uavBrain.targetPos = getRandomTarget(uavBrain, UavBrain.RandomWalkMaxDistance);
                 uavBrain.nextPheremone = PheremoneType.Searched;
             end
@@ -358,17 +421,20 @@ classdef UavBrain < handle
                 uavBrain.nextPheremone = PheremoneType.Searched;
             end
             
-            %uavBrain.targetPos = [0 0];
-            
-            if ~isempty(uavBrain.closeUavs)
-                [~, closestUavInd] = min(uavBrain.closeSqrDists);
-                closestUav = uavBrain.closeUavs(closestUavInd);
-                closestUavPos = messages(closestUav).pos;
-                closestUavBearing = messages(closestUav).bearing;
+            if uavBrain.closeUavCount > 0
+                closestUavPos = messages(uavBrain.closestUav).pos;
+                closestUavBearing = messages(uavBrain.closestUav).bearing;
 
-                % Find the avoidance trajectory and use
-                [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
-                    uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
+                if uavBrain.uavPriority(messages(uavBrain.closestUav).id, messages(uavBrain.closestUav).state) ...
+                        && uavBrain.closestSqrDist > UavBrain.DangerRadius^2
+                    % Fly as usual, with minimum speed
+                    uavBrain.flyToTarget(dt);
+                    uavBrain.nextVelocity = UavBody.MinVelocity;
+                else
+                    % Find the avoidance trajectory and use
+                    [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
+                        uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
+                end
             else
                 uavBrain.flyToTarget(dt);
             end
@@ -388,7 +454,7 @@ classdef UavBrain < handle
         % Avoidance behaviour is similar to the orbiting behaviour - UAVs
         % will accelerate or decelerate depending on the relative positions
         % and trajectories of them and the approaching UAV.
-        function nextState = approach(uavBrain, cloud, t, dt, messages)
+        function nextState = approach(uavBrain, dt, messages)
             %% State Actions
             if uavBrain.lastState ~= UavState.Approach
                 uavBrain.approachTimeout = UavBrain.ApproachTimeoutTime;
@@ -396,19 +462,60 @@ classdef UavBrain < handle
                 %uavBrain.approachTimeout = uavBrain.approachTimeout - dt;
             end
             concDiff = uavBrain.conc - uavBrain.lastConc;
-            if ~isempty(uavBrain.closeUavs)
-                [~, closestUavInd] = min(uavBrain.closeSqrDists);
-                closestUav = uavBrain.closeUavs(closestUavInd);
-                closestUavPos = messages(closestUav).pos;
-                closestUavBearing = messages(closestUav).bearing;
+            if uavBrain.closeUavCount > 0
+                closestUavPos = messages(uavBrain.closestUav).pos;
+                closestUavBearing = messages(uavBrain.closestUav).bearing;
 
-                % Find the avoidance trajectory and use
-                [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
-                    uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
-                uavBrain.nextVelocity = UavBody.MaxVelocity;
+                if uavBrain.uavPriority(messages(uavBrain.closestUav).id, messages(uavBrain.closestUav).state) ...
+                        && uavBrain.closestSqrDist > UavBrain.DangerRadius^2
+                    uavBrain.nextVelocity = UavBody.MinVelocity;
+                    % If we are flying into the cloud and are within the map
+                    % bounds, go straight ahead
+                    if concDiff > 0 && ~uavBrain.leavingMap
+                        uavBrain.nextTurnRate = 0;
+                    % Otherwise, steer right
+                    else
+                        uavBrain.nextTurnRate = UavBody.MaxTurnRate * 0.5;
+                    end
+                else
+                    % Find the avoidance trajectory and use
+                    [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
+                        uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
+                    uavBrain.nextVelocity = UavBody.MaxVelocity;
+                    % If the other UAV is tracking and travelling the same
+                    % direction, use the Track avoidance method instead
+                    if messages(uavBrain.closestUav).state == UavState.Track && ...
+                            uavBrain.closestSqrDist > (UavBrain.DangerRadius+30)^2
+                        angDiff = wrapToPi(closestUavBearing - uavBrain.bearingEstimate);
+                        if abs(angDiff) < pi/4
+                            avoidVec = closestUavPos - uavBrain.posEstimate;
+                            avoidAng = atan2(avoidVec(1),avoidVec(2));
+                            angDiff = wrapToPi(avoidAng - uavBrain.bearingEstimate);
+                            front = abs(angDiff) < pi/2;
+                            if front
+                                uavBrain.nextVelocity = UavBody.MinVelocity;
+                            else
+                                uavBrain.nextVelocity = UavBody.MinVelocity + (UavBody.MaxVelocity - UavBody.MinVelocity)*2/3;
+                            end
+                            % If we are flying into the cloud, go straight ahead
+                            if concDiff > 0
+                                uavBrain.nextVelocity = UavBody.MaxVelocity;
+                                uavBrain.nextTurnRate = 0;
+                            % Otherwise, steer right
+                            else
+                                uavBrain.nextVelocity = UavBody.MinVelocity;
+                                % TODO: This value is kind of dependent on dt for its
+                                % sanity, realistically you only want a small angle change
+                                % on each timestep to prevent it from getting stuck
+                                uavBrain.nextTurnRate = UavBody.MaxTurnRate * 0.5;
+                            end
+                        end
+                    end
+                end
             else
-                % If we are flying into the cloud, go straight ahead
-                if concDiff > 0
+                % If we are flying into the cloud and are within the map
+                % bounds, go straight ahead
+                if concDiff > 0 && ~uavBrain.leavingMap
                     uavBrain.nextVelocity = UavBody.MaxVelocity;
                     uavBrain.nextTurnRate = 0;
                 % Otherwise, steer right
@@ -426,7 +533,7 @@ classdef UavBrain < handle
             % low, or on to tracking if it crosses the threshold
             if uavBrain.conc < 0.025;
                 nextState = UavState.Search;
-            elseif uavBrain.conc > 1.0
+            elseif uavBrain.conc > 0.9
                 nextState = UavState.Track;
             elseif uavBrain.approachTimeout <= 0
                 uavBrain.retreating = true;
@@ -437,37 +544,60 @@ classdef UavBrain < handle
         end
         
         % Track state
-        function nextState = track(uavBrain, cloud, t, dt, messages)
+        function nextState = track(uavBrain, dt, messages)
             %% State Actions
             concDiff = uavBrain.conc - uavBrain.lastConc;
             % Used to calculate the turning rate/direction
             contourDistance = 1.0 - uavBrain.conc;
-%             if sign(contourDistance) == 1
-%                 contourDistance = contourDistance - 0.05;
-%             else
-%                 contourDistance = contourDistance + 0.05;
-%             end
             if sign(concDiff) == sign(contourDistance)
                 uavBrain.nextTurnRate = 0;
             else
-                %desiredTurnRate = contourDistance * 2 * UavBody.MaxTurnRate;%sqrt(abs(contourDistance)) * sign(contourDistance) * UavBody.MaxTurnRate;
                 desiredTurnRate = contourDistance * 5 * UavBody.MaxTurnRate;
-                %desiredTurnRate = -(concDiff^2 * sign(concDiff)) * 50 * UavBody.MaxTurnRate;
                 uavBrain.nextTurnRate = max(min(desiredTurnRate,UavBody.MaxTurnRate/3),-UavBody.MaxTurnRate/5);
             end
-            if ~isempty(uavBrain.closeUavs)
-                [~, closestUavInd] = min(uavBrain.closeSqrDists);
-                closestUav = uavBrain.closeUavs(closestUavInd);
-                closestUavPos = messages(closestUav).pos;
-
-                avoidVec = closestUavPos - uavBrain.posEstimate;
-                avoidAng = atan2(avoidVec(1),avoidVec(2));
-                angDiff = wrapToPi(avoidAng - uavBrain.bearingEstimate);
-                front = abs(angDiff) < pi/2;
-                if front
-                    uavBrain.nextVelocity = UavBody.MinVelocity;
+            if uavBrain.closeUavCount > 0
+                if uavBrain.closeUavCount > 1
+                    if rand < dt*(1/30)
+                        uavBrain.nextPheremone = PheremoneType.Searched;
+                    end
+                end
+                closestUavPos = messages(uavBrain.closestUav).pos;
+                closestUavBearing = messages(uavBrain.closestUav).bearing;
+                if uavBrain.uavPriority(messages(uavBrain.closestUav).id, messages(uavBrain.closestUav).state) ...
+                        && uavBrain.closestSqrDist > UavBrain.DangerRadius^2
+                    avoidVec = closestUavPos - uavBrain.posEstimate;
+                    avoidAng = atan2(avoidVec(1),avoidVec(2));
+                    angDiff = wrapToPi(avoidAng - uavBrain.bearingEstimate);
+                    front = abs(angDiff) < pi/2;
+                    if front
+                        uavBrain.nextVelocity = UavBody.MinVelocity;
+                    else
+                        uavBrain.nextVelocity = UavBody.MinVelocity + (UavBody.MaxVelocity - UavBody.MinVelocity)*2/3;
+                    end
                 else
-                    uavBrain.nextVelocity = UavBody.MinVelocity + (UavBody.MaxVelocity - UavBody.MinVelocity)*2/3;
+                    angDiff = wrapToPi(closestUavBearing - uavBrain.bearingEstimate);
+                    % If we are at serious risk of collision, take evasive maneuvers
+                    if uavBrain.closestSqrDist < UavBrain.DangerRadius^2 ...
+                            || abs(angDiff) > pi/4
+                        if uavBrain.id < messages(uavBrain.closestUav).id
+                            [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
+                                uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
+                            uavBrain.nextVelocity = UavBody.MaxVelocity;
+                        else
+                            uavBrain.nextVelocity = UavBody.MinVelocity;
+                        end
+                    % Otherwise, adjust speed to increase distance and carry on
+                    else
+                        avoidVec = closestUavPos - uavBrain.posEstimate;
+                        avoidAng = atan2(avoidVec(1),avoidVec(2));
+                        angDiff = wrapToPi(avoidAng - uavBrain.bearingEstimate);
+                        front = abs(angDiff) < pi/2;
+                        if front
+                            uavBrain.nextVelocity = UavBody.MinVelocity;
+                        else
+                            uavBrain.nextVelocity = UavBody.MinVelocity + (UavBody.MaxVelocity - UavBody.MinVelocity)*2/3;
+                        end
+                    end
                 end
             else
                 uavBrain.nextVelocity = UavBody.MinVelocity + (UavBody.MaxVelocity - UavBody.MinVelocity)/3;
@@ -481,16 +611,36 @@ classdef UavBrain < handle
             end
         end
         
-        function draw(uavBrain)
-            if uavBrain.currentState == UavState.Search
-                plot(uavBrain.targetPos(1),uavBrain.targetPos(2),'x');
+        function nextState = land(uavBrain, dt, messages)
+            %% State Actions
+            uavBrain.targetPos = uavBrain.home;
+            
+            if uavBrain.closeUavCount > 0
+                closestUavPos = messages(uavBrain.closestUav).pos;
+                closestUavBearing = messages(uavBrain.closestUav).bearing;
+
+                if uavBrain.uavPriority(messages(uavBrain.closestUav).id, messages(uavBrain.closestUav).state) ...
+                        && uavBrain.closestSqrDist > UavBrain.DangerRadius^2
+                    % Fly to home steadily
+                    uavBrain.flyToTarget(dt);
+                    uavBrain.nextVelocity = UavBody.MinVelocity;
+                else
+                    % Find the avoidance trajectory and use
+                    [uavBrain.nextVelocity, uavBrain.nextTurnRate] = ...
+                        uavBrain.avoidanceTrajectory(closestUavPos, closestUavBearing, dt);
+                end
+            else
+                uavBrain.flyToTarget(dt);
             end
-%             for i = 1:length(uavBrain.localPheremones)
-%                 if uavBrain.localPheremones(i).type == PheremoneType.Searched
-%                     pos = uavBrain.localPheremones(i).pos;
-%                     plot(pos(1),pos(2),'+b'); 
-%                 end
-%             end
+            
+            targetDiff = uavBrain.targetPos - uavBrain.posEstimate;
+            % If the target location has been reached, land the UAV
+            if sqrLen(targetDiff) <= (UavBody.MaxVelocity * dt)^2
+                uavBrain.uavBody.disable;
+            end
+            
+            %% State Transition
+            nextState = UavState.Land;
         end
     end
     
