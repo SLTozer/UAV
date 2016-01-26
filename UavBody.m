@@ -4,10 +4,9 @@ classdef UavBody < handle
         MaxTurnRate = pi/30;
         MinVelocity = 10;
         MaxVelocity = 20;
-        CrashRadius = 10;
     end
     
-    properties (SetAccess = private, GetAccess = public)
+    properties (SetAccess = private, GetAccess = private)
         pos
         bearing
     end

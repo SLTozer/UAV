@@ -5,47 +5,60 @@ function sim_start
 % Arthur Richards, Nov 2014
 %
 
-%% Drawing instructions
-
-% Must be set true for anything to be drawn
-drawAny = true;
-% Draw the cloud
-drawCloud = true;
-% Draw the UAVs
-drawUavs = true;
-% Draw control info used by the AIs
-drawAI = true;
-% Draws the pheremones used by AIs - EXTREMELY performance intensive
-drawAIExtra = false;
-
-
-
-
-
-% load cloud data
-% choose a scenario
-load 'cloud1.mat'
-% load 'cloud2.mat'
-
-displayAI = true;
-
-mapRect = [min(cloud.x),min(cloud.y);max(cloud.x),max(cloud.y)];
-% Slightly shrunken map
-aiMapRect = mapRect * 0.9;
+%% Simulation state
 
 % time and time step
 t = 0;
 dt = 1.0;
-% UAVs have flight time of 30 mins only
-maxTime = 1800.0;
+
+% The minimum distance at which a pair of UAVs may be without crashing into
+% each other
+uavCrashRadius = 15.0;
+% The minimum distance apart at which all UAVs start
+initialUavSpacing = 50.0;
+
+% The probability that a given UAV's battery life is not full, causing it
+% to run out at a random point in the simulation
+uavBatteryFailProb = 0.1;
+
+
+%% Drawing flags
+
+% Must be set true for anything to be drawn
+drawAny = true;
+% Draw the cloud
+drawCloud = false;
+% Draw the UAVs
+drawUavs = true;
+% Draw control info used by the AIs
+drawAI = false;
+% Draws the pheremones used by AIs - EXTREMELY performance intensive
+drawAIExtra = false;
+
+%% Map data
+
+% load cloud data
+% load 'cloud1.mat'
+load 'cloud2.mat'
+
+mapRect = [min(cloud.x),min(cloud.y);max(cloud.x),max(cloud.y)];
+
+mapSize  = [max(cloud.x) - min(cloud.x), max(cloud.y) - min(cloud.y)];
+mapBorder = mapSize * (1/20);
+% Slightly shrunken map
+aiMapRect = [mapRect(1,1)+mapBorder(1), mapRect(1,2)+mapBorder(2); ...
+             mapRect(2,1)-mapBorder(1), mapRect(2,2)-mapBorder(2)];
 
 %% UAV initial state
 
 % number of UAVs
-uavCount = 12;
+uavCount = 24;
 
-% starting state of UAVs
-startCirc = uavCount * 50;
+% UAVs have flight time of 30 mins only
+maxTime = 1800.0;
+
+% starting positions of UAVs
+startCirc = uavCount * initialUavSpacing;
 startRad = startCirc / (2*pi);
 
 uavBodies = UavBody.empty(uavCount,0);
@@ -61,25 +74,32 @@ for i = 1:uavCount
     errAng = startAng + (randn*pi/36);
     % include random battery failure - some UAVs may not be fully charged
     % 10% of batteries have reduced life, lasting 100-1800 seconds
-    if rand < 0.1
+    if rand < uavBatteryFailProb
         batteryLife = rand * (maxTime - 100) + 100;
     else
         batteryLife = maxTime;
     end
-    % create objects 
+    % create the UAV and its AI 
     uavBodies(i) = UavBody(errPos, errAng, batteryLife);
     uavBrains(i) = UavBrain(uavBodies(i), i, aiMapRect);
 end
 
-% i-th message is sent from the i-th uav
-% Each row of messages represents messages sent from a particular timestep.
-% The j-th row of messages will arrive in j-1 timesteps.
+% uavMessages(i,_) is sent from the i-th uav
+% Each col of uavMessages corresponds to a set of messages in transit, all
+% sent at the same time
+% The first column contains messages that are just about to arrive, and the
+% last contains messages that have only just been sent
+% Messages propagate through columns s.t. each message takes 1 second to
+% move from the first to the last column, causing a 1 second delay between
+% the sending and receiving of a message
 transitMessageCount = ceil(1/dt);
 uavMessages(uavCount,transitMessageCount) = Message();
-if dt < 1.0
-    error(['Message logic has not been set to deal with timesteps '...
-           'lower than 1.0']);
-end
+
+%% Simulation setup
+
+crashedUavs = [];
+outOfBoundsUavs = [];
+deadUavs = [];
 
 if drawAny
     % open new figure window
@@ -87,11 +107,7 @@ if drawAny
     hold on % so each plot doesn't wipe the predecessor
 end
 
-crashedUavs = [];
-outOfBoundsUavs = [];
-deadUavs = [];
-
-% main simulation loop
+%% Simulation loop
 while t < maxTime,
     %% Decision step
     % Make decisions at time t
@@ -115,20 +131,18 @@ while t < maxTime,
         uavBodies(i).move(dt);
     end
     
-    % Handle crashes, assorted failure, and intentional landing
+    %% Crashes and assorted failure
+    
     for i = 1:uavCount
         if uavBodies(i).operational
             % UAVs that crash into each other
             for j = i+1:uavCount
                 % Allow UAVs 30 seconds for take-off and calibration
                 if t > 30 && uavBodies(j).operational
-                    if UavBody.collision(uavBodies(i), uavBodies(j), 15) %sqrLen(uavBodies(i).pos-uavBodies(j).pos) <= 225
-                        disp('collision!');
+                    if UavBody.collision(uavBodies(i), uavBodies(j), uavCrashRadius)
                         uavBodies(i).disable;
                         uavBodies(j).disable;
                         crashedUavs = [crashedUavs i j];
-                    elseif UavBody.collision(uavBodies(i), uavBodies(j), 50)%sqrLen(uavBodies(i).pos-uavBodies(j).pos) <= 2500
-                        disp('near collision!');
                     end
                 end
             end
